@@ -10,3 +10,10 @@
 #2. Rewrite in C/C++ for speed
 #2. Run this program in a cgroup at (20~ CPU CAP for)
 
+
+import cv2 as cv
+
+img = cv.imread('photo.jpeg')
+cv.imshow('road', img)
+cv.waitKey(0)
+
