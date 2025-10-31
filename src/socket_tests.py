@@ -8,3 +8,6 @@ import json
 SOCKET_PATH=/tmp/test.sock
 
 socket
+
+#STREAM sockets: work like tcp, have to manage clients, connections and deconections
+#DATAGRAM: udp like, broadcast and forget

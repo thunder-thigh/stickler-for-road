@@ -1,99 +1,105 @@
 #!/usr/bin/env python3
-import pygame
 import socket
-import json
-import math
 import os
-import time
+import json
 import select
+import pygame
+import sys
+import math
 
-SOCKET_PATH = "/tmp/car_state.sock"
-WIDTH, HEIGHT = 800, 600
-BG_COLOR = (25, 25, 25)
-CAR_COLOR = (0, 200, 255)
-FPS = 60
+SERVER_PATH = "/tmp/car_state_server.sock"
+CLIENT_PATH = f"/tmp/car_client_{os.getpid()}.sock"
+
+# Cleanup old client socket
+if os.path.exists(CLIENT_PATH):
+    os.remove(CLIENT_PATH)
+
+# Create client datagram socket
+client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+client.bind(CLIENT_PATH)
+
+# Register with the server
+client.sendto(f"REGISTER:{CLIENT_PATH}".encode(), SERVER_PATH)
+print(f"[VISUALIZER] Registered as {CLIENT_PATH}")
 
 # --- Pygame setup ---
 pygame.init()
+WIDTH, HEIGHT = 800, 600
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Car Visualizer")
-font = pygame.font.Font(None, 28)
+
 clock = pygame.time.Clock()
 
-# --- Connect to socket ---
-client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-print(f"Connecting to {SOCKET_PATH} ...")
-while True:
-    try:
-        client.connect(SOCKET_PATH)
-        print("Connected to car state socket.")
-        break
-    except FileNotFoundError:
-        print("Waiting for socket...")
-        time.sleep(1)
-    except ConnectionRefusedError:
-        print("Socket exists but not ready...")
-        time.sleep(1)
+# Car render settings
+CAR_SIZE = (40, 20)
+CAR_COLOR = (255, 100, 50)
+BG_COLOR = (30, 30, 30)
+TEXT_COLOR = (200, 200, 200)
+FONT = pygame.font.SysFont("consolas", 18)
 
-client.setblocking(False)
+# Coordinate scale (meters → pixels)
+SCALE = 5.0
 
-car_state = {"x": WIDTH / 2, "y": HEIGHT / 2, "angle": 0.0}
-trail = []
+def draw_car(state):
+    """Draw car position and orientation from state."""
+    x = state.get("x", 0.0) * SCALE + WIDTH / 2
+    y = HEIGHT / 2 - state.get("y", 0.0) * SCALE
+    angle_deg = state.get("angle", 0.0)
+    angle_rad = -math.radians(angle_deg)
 
-def draw_car(surface, x, y, angle):
-    size = 20
-    pts = [
-        (math.cos(math.radians(angle)) * size,
-         math.sin(math.radians(angle)) * size),
-        (math.cos(math.radians(angle + 140)) * size * 0.6,
-         math.sin(math.radians(angle + 140)) * size * 0.6),
-        (math.cos(math.radians(angle - 140)) * size * 0.6,
-         math.sin(math.radians(angle - 140)) * size * 0.6),
-    ]
-    pts = [(x + px, y + py) for (px, py) in pts]
-    pygame.draw.polygon(surface, CAR_COLOR, pts)
+    # Create car rect and rotate it
+    car_rect = pygame.Rect(0, 0, *CAR_SIZE)
+    car_rect.center = (x, y)
+    car_surface = pygame.Surface(CAR_SIZE, pygame.SRCALPHA)
+    car_surface.fill(CAR_COLOR)
+    rotated = pygame.transform.rotate(car_surface, math.degrees(angle_rad))
+    rotated_rect = rotated.get_rect(center=car_rect.center)
+    screen.blit(rotated, rotated_rect)
+
+    # Draw heading line
+    line_len = 30
+    end_x = x + line_len * math.cos(angle_rad)
+    end_y = y + line_len * math.sin(angle_rad)
+    pygame.draw.line(screen, (0, 255, 0), (x, y), (end_x, end_y), 2)
+
+    # Draw info text
+    info = f"x={state.get('x',0):.2f}  y={state.get('y',0):.2f}  θ={angle_deg:.1f}°  status={state.get('status','idle')}"
+    text = FONT.render(info, True, TEXT_COLOR)
+    screen.blit(text, (10, 10))
+
+car_state = {}
 
 # --- Main loop ---
-running = True
-buffer = b""
+try:
+    while True:
+        # Handle quit events
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                raise KeyboardInterrupt
 
-while running:
-    dt = clock.tick(FPS)
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            running = False
+        # Read from socket (non-blocking)
+        readable, _, _ = select.select([client], [], [], 0.02)
+        if readable:
+            data, _ = client.recvfrom(4096)
+            try:
+                car_state = json.loads(data.decode())
+            except json.JSONDecodeError:
+                continue
 
-    # --- Read from socket ---
-    try:
-        ready, _, _ = select.select([client], [], [], 0)
-        if ready:
-            chunk = client.recv(4096)
-            if not chunk:
-                print("Disconnected from socket.")
-                running = False
-                break
-            buffer += chunk
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                try:
-                    car_state = json.loads(line.decode())
-                    trail.append((car_state["x"], car_state["y"]))
-                except json.JSONDecodeError:
-                    pass
-    except Exception as e:
-        pass
+        # Draw the scene
+        screen.fill(BG_COLOR)
+        if car_state:
+            draw_car(car_state)
+        pygame.display.flip()
+        clock.tick(60)
 
-    # --- Draw ---
-    screen.fill(BG_COLOR)
-    # draw trail
-    if len(trail) > 1:
-        pygame.draw.lines(screen, (100, 100, 100), False, trail[-10:], 2)
-
-    draw_car(screen, car_state["x"], car_state["y"], car_state["angle"])
-    txt = font.render(f"x={car_state['x']:.1f}  y={car_state['y']:.1f}  angle={car_state['angle']:.1f}°", True, (200, 200, 200))
-    screen.blit(txt, (10, 10))
-    pygame.display.flip()
-
-client.close()
-pygame.quit()
-print("Visualizer stopped.")
+except KeyboardInterrupt:
+    print("\n[VISUALIZER] Shutting down...")
+finally:
+    # Unregister and cleanup
+    client.sendto(f"UNREGISTER:{CLIENT_PATH}".encode(), SERVER_PATH)
+    client.close()
+    if os.path.exists(CLIENT_PATH):
+        os.remove(CLIENT_PATH)
+    pygame.quit()
+    sys.exit(0)
